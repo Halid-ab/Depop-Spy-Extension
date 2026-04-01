@@ -24,12 +24,24 @@
     }
 
     // --- Data Extraction ---
-    
+
     function extractNextData() {
         try {
             const script = document.getElementById('__NEXT_DATA__');
             if (script) {
-                return JSON.parse(script.textContent);
+                const data = JSON.parse(script.textContent);
+
+                // Log the structure for debugging (truncated to 2 levels)
+                const truncated = JSON.stringify(data, (key, value) => {
+                    if (typeof value === 'object' && value !== null) {
+                        const depth = key.split('.').length;
+                        if (depth > 2) return '[Object]';
+                    }
+                    return value;
+                }, 2);
+                console.log('🕵️ Price Spy: __NEXT_DATA__ structure:', truncated.substring(0, 1000) + '...');
+
+                return data;
             }
         } catch (e) {
             console.error("🕵️ Price Spy: Error parsing __NEXT_DATA__", e);
@@ -38,10 +50,45 @@
     }
 
     function getListingFromNextData(nextData) {
-        if (!nextData || !nextData.props || !nextData.props.pageProps) return null;
-        const product = nextData.props.pageProps.product || nextData.props.pageProps.listing;
-        if (product) return product;
-        return nextData.props.pageProps.initialState?.products?.product;
+        if (!nextData) return null;
+
+        // Deep search function that recursively walks the entire JSON tree
+        function deepSearchForListing(obj, visited = new Set()) {
+            // Prevent infinite loops from circular references
+            if (!obj || typeof obj !== 'object' || visited.has(obj)) return null;
+            visited.add(obj);
+
+            // Check if this object looks like a product/listing
+            // Must have: price field AND title field AND (id OR slug)
+            const hasPrice = obj.price !== undefined || obj.priceAmount !== undefined;
+            const hasTitle = obj.title !== undefined && typeof obj.title === 'string';
+            const hasId = obj.id !== undefined || obj.slug !== undefined;
+
+            if (hasPrice && hasTitle && hasId) {
+                console.log('🕵️ Price Spy: Found product node via deep search');
+                return obj;
+            }
+
+            // Recursively search all properties
+            for (const key in obj) {
+                if (obj.hasOwnProperty(key)) {
+                    const result = deepSearchForListing(obj[key], visited);
+                    if (result) return result;
+                }
+            }
+
+            // Also check array elements
+            if (Array.isArray(obj)) {
+                for (const item of obj) {
+                    const result = deepSearchForListing(item, visited);
+                    if (result) return result;
+                }
+            }
+
+            return null;
+        }
+
+        return deepSearchForListing(nextData);
     }
 
     // --- Data Scraping ---
