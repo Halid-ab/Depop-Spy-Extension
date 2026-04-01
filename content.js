@@ -138,6 +138,56 @@
         };
     }
 
+    function extractSearchResults(searchData) {
+        if (!searchData) return [];
+
+        // Try all known result paths
+        const paths = [
+            searchData.props?.pageProps?.initialState?.products?.results,
+            searchData.props?.pageProps?.products,
+            searchData.props?.pageProps?.initialData?.products,
+            searchData.props?.pageProps?.searchResults
+        ];
+
+        for (const path of paths) {
+            if (Array.isArray(path) && path.length > 0) {
+                console.log('🕵️ Price Spy: Found results via path search');
+                return path;
+            }
+        }
+
+        // Fallback: recursively search for any array with items that have a price field
+        function findResultsArray(obj, visited = new Set()) {
+            if (!obj || typeof obj !== 'object' || visited.has(obj)) return null;
+            visited.add(obj);
+
+            // Check if this is an array with items that have prices
+            if (Array.isArray(obj) && obj.length > 2) {
+                const hasItemsWithPrice = obj.slice(0, 3).some(item =>
+                    item && typeof item === 'object' &&
+                    (item.price !== undefined || item.priceAmount !== undefined)
+                );
+                if (hasItemsWithPrice) {
+                    console.log('🕵️ Price Spy: Found results via recursive array search');
+                    return obj;
+                }
+            }
+
+            // Recursively search properties
+            for (const key in obj) {
+                if (obj.hasOwnProperty(key)) {
+                    const result = findResultsArray(obj[key], visited);
+                    if (result) return result;
+                }
+            }
+
+            return null;
+        }
+
+        const fallbackResults = findResultsArray(searchData);
+        return fallbackResults || [];
+    }
+
     // --- Theme Management ---
 
     function detectTheme(card) {
@@ -265,23 +315,42 @@
             // 5. Market Data
             let soldData = { avg: 0, min: 0, max: 0, count: 0 };
             try {
-                const soldUrl = `https://www.depop.com/search/?q=${encodeURIComponent(title)}&sold=true`;
-                const response = await fetch(soldUrl);
-                const html = await response.text();
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const script = doc.getElementById('__NEXT_DATA__');
+                const titleEncoded = encodeURIComponent(title);
+                const soldUrls = [
+                    `https://www.depop.com/search/?q=${titleEncoded}&sold=true`,
+                    `https://www.depop.com/search/?q=${titleEncoded}&itemsType=sold`
+                ];
+
+                let searchData = null;
+                let html = null;
+
+                // Try both URL formats
+                for (const soldUrl of soldUrls) {
+                    try {
+                        const response = await fetch(soldUrl);
+                        html = await response.text();
+                        const doc = new DOMParser().parseFromString(html, 'text/html');
+                        const script = doc.getElementById('__NEXT_DATA__');
+                        if (script) {
+                            searchData = JSON.parse(script.textContent);
+                            break;
+                        }
+                    } catch (e) {}
+                }
+
                 let prices = [];
-                if (script) {
-                    const searchData = JSON.parse(script.textContent);
-                    const results = searchData.props.pageProps.initialState?.products?.results || 
-                                    searchData.props.pageProps.products || [];
+                if (searchData) {
+                    const results = extractSearchResults(searchData);
                     prices = results.map(r => parseFloat(r.price?.priceAmount)).filter(p => p > 0);
                 }
-                if (prices.length === 0) {
+
+                if (prices.length === 0 && html) {
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
                     prices = Array.from(doc.querySelectorAll('[data-testid="product__card"]'))
                         .map(card => parsePrice(card.querySelector('[class*="Price"]')?.textContent))
                         .filter(p => p > 0);
                 }
+
                 if (prices.length > 0) {
                     soldData.count = prices.length;
                     soldData.min = Math.min(...prices);
@@ -300,8 +369,7 @@
                 const script = doc.getElementById('__NEXT_DATA__');
                 if (script) {
                     const searchData = JSON.parse(script.textContent);
-                    const results = searchData.props.pageProps.initialState?.products?.results || 
-                                    searchData.props.pageProps.products || [];
+                    const results = extractSearchResults(searchData);
                     activeListings = results.slice(0, 12).map(r => ({
                         title: r.title || "Unknown",
                         price: parseFloat(r.price?.priceAmount) || 0,
