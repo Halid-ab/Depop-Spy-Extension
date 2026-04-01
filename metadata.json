@@ -1,0 +1,5 @@
+{
+  "name": "Depop Price Spy",
+  "description": "A Chrome extension that helps you find the best deals on Depop by tracking price drops and comparing with sold listings.",
+  "requestFramePermissions": []
+}
