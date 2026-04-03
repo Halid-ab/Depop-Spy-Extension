@@ -758,35 +758,114 @@
         btn.onclick = () => {
             const offer = parseFloat(input.value);
             if (isNaN(offer) || offer <= 0) return;
+
+            // Show spinner during analysis
             results.style.display = 'block';
-            const percent = (offer / data.currentPrice) * 100;
-            let resultVerdict = "";
-            let resultColor = "";
-            let resultExp = "";
-            if (percent < 50) {
-                resultVerdict = "Lowball Alert 🚩";
-                resultColor = "var(--spy-error)";
-                resultExp = "This offer is likely too low and might get you blocked. Most sellers won't consider less than 60% of asking.";
-            } else if (percent < 75) {
-                resultVerdict = "Aggressive Offer ⚠️";
-                resultColor = "var(--spy-warning)";
-                resultExp = "A bit low, but might work if the item has been listed for a long time or the seller is motivated.";
-            } else if (percent < 90) {
-                resultVerdict = "Strong Offer ✅";
-                resultColor = "var(--spy-success)";
-                resultExp = "This is a fair offer that most sellers will seriously consider or counter-offer.";
-            } else {
-                resultVerdict = "Near Asking 💎";
-                resultColor = "var(--spy-success)";
-                resultExp = "Very likely to be accepted immediately.";
-            }
-            verdict.innerText = resultVerdict;
-            verdict.style.color = resultColor;
-            explanation.innerText = resultExp;
-            if (data.soldData.avg > 0) {
+            verdict.innerText = 'Analyzing...';
+            verdict.style.color = '#94a3b8';
+            explanation.innerText = '';
+            sweetSpot.style.display = 'none';
+
+            setTimeout(() => {
+                // 1. Get base seller score
+                const baseScore = calculateSellerScore(data).raw;
+
+                // 2. Calculate offer score
+                let offerScore = 0;
+                const percentOfAsk = (offer / data.currentPrice) * 100;
+                const belowAsk = data.currentPrice - offer;
+                const percentBelowAsk = (belowAsk / data.currentPrice) * 100;
+
+                // Points based on % below asking
+                if (percentBelowAsk <= 10) {
+                    offerScore += 3;
+                } else if (percentBelowAsk <= 20) {
+                    offerScore += 1;
+                } else if (percentBelowAsk <= 30) {
+                    offerScore -= 1;
+                } else {
+                    offerScore -= 3;
+                }
+
+                // Points based on avg sold comparison
+                if (data.soldData.avg > 0) {
+                    const diffFromAvg = data.soldData.avg - offer;
+                    if (offer > data.soldData.avg) {
+                        offerScore += 2;
+                    } else if (diffFromAvg <= 5) {
+                        offerScore += 1;
+                    } else if (diffFromAvg <= 15) {
+                        offerScore -= 1;
+                    } else {
+                        offerScore -= 3;
+                    }
+                }
+
+                // 3. Combined score
+                const combined = baseScore + offerScore;
+
+                // 4. Determine verdict and color
+                let resultVerdict = "";
+                let resultColor = "";
+                if (combined >= 8) {
+                    resultVerdict = "Strong chance of acceptance ✅";
+                    resultColor = "#22c55e";
+                } else if (combined >= 4) {
+                    resultVerdict = "Decent shot 🟡";
+                    resultColor = "#eab308";
+                } else if (combined >= 1) {
+                    resultVerdict = "Slim chance ⚠️";
+                    resultColor = "#f97316";
+                } else {
+                    resultVerdict = "Very likely declined ❌";
+                    resultColor = "#ef4444";
+                }
+
+                // 5. Generate explanation
+                let motivationText = "";
+                if (data.daysListed > 30) {
+                    motivationText = "The seller appears motivated (listed 30+ days).";
+                } else if (data.priceHistory.length > 1 && data.priceHistory[0].price > data.currentPrice) {
+                    motivationText = "The seller has already dropped the price, suggesting flexibility.";
+                } else if (data.daysListed > 14) {
+                    motivationText = "The seller may be willing to negotiate.";
+                } else {
+                    motivationText = "The seller is less likely to negotiate on a fresh listing.";
+                }
+
+                let soldComparison = "";
+                if (data.soldData.avg > 0) {
+                    if (offer > data.soldData.avg) {
+                        soldComparison = ` Your offer is above the market average (${formatCurrency(data.soldData.avg, data.currentPriceStr)}).`;
+                    } else {
+                        const belowAvg = Math.round(((data.soldData.avg - offer) / data.soldData.avg) * 100);
+                        soldComparison = ` Your offer is ${belowAvg}% below market average.`;
+                    }
+                }
+
+                const resultExp = `Your offer of ${formatCurrency(offer, data.currentPriceStr)} is ${Math.round(percentBelowAsk)}% below asking. ${motivationText}${soldComparison}`;
+
+                // 6. Calculate sweet spot
+                let sweetSpotPrice = 0;
+                if (data.soldData.avg > 0) {
+                    if (baseScore >= 5) {
+                        sweetSpotPrice = Math.max(offer, data.soldData.avg * 0.90);
+                    } else if (baseScore >= 2) {
+                        sweetSpotPrice = data.soldData.avg * 0.95;
+                    } else {
+                        sweetSpotPrice = data.currentPrice * 0.92;
+                    }
+                } else {
+                    sweetSpotPrice = data.currentPrice * 0.85;
+                }
+
+                // Update results
+                verdict.innerText = resultVerdict;
+                verdict.style.color = resultColor;
+                explanation.innerText = resultExp;
                 sweetSpot.style.display = 'block';
-                sweetSpot.innerText = `SWEET SPOT: ${formatCurrency(data.soldData.avg * 0.9, data.currentPriceStr)} – ${formatCurrency(data.soldData.avg, data.currentPriceStr)}`;
-            }
+                sweetSpot.innerText = `💡 Sweet spot: ~${formatCurrency(sweetSpotPrice, data.currentPriceStr)}`;
+            }, 800);
         };
     }
 
