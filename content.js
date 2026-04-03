@@ -735,13 +735,15 @@
             else if (data.currentPrice < data.soldData.avg * 0.9) { raw -= 2; bullets.push({ icon: "🏷️", text: "Already priced competitively" }); }
         }
         if (data.demand.bags > 15) { raw -= 2; bullets.push({ icon: "🔥", text: "High interest (Many people have in bag)" }); }
-        if (data.seller.reviews > 100) { raw += 1; bullets.push({ icon: "✅", text: "Experienced seller" }); }
+        if (data.seller.reviews < 25) { raw += 1; bullets.push({ icon: "🆕", text: "Newer seller (More flexible)" }); }
+        else if (data.seller.reviews > 100) { raw -= 1; bullets.push({ icon: "✅", text: "Experienced seller (Knows market value)" }); }
         const normalized = Math.max(0, Math.min(10, ((raw + 5) / 15) * 10));
         let verdict = "Uncertain ⚪";
         let color = "#94a3b8";
-        if (raw >= 7) { verdict = "Very Likely ✅"; color = "#22c55e"; }
+        if (raw >= 6) { verdict = "Very Likely ✅"; color = "#22c55e"; }
         else if (raw >= 3) { verdict = "Likely 🟡"; color = "#eab308"; }
-        else if (raw <= -3) { verdict = "Unlikely 🔴"; color = "#ef4444"; }
+        else if (raw >= 1) { verdict = "Uncertain ⚪"; color = "#94a3b8"; }
+        else if (raw <= 0) { verdict = "Unlikely 🔴"; color = "#ef4444"; }
         return { raw, normalized, verdict, color, bullets };
     }
 
