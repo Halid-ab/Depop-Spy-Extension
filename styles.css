@@ -464,6 +464,17 @@
     font-size: 13px;
 }
 
+.market-data-source {
+    font-size: 12px;
+    color: var(--spy-muted);
+    margin-top: 8px;
+    line-height: 1.5;
+}
+
+.market-data-source strong {
+    color: var(--spy-ink);
+}
+
 /* Seller Tab */
 .seller-stats-header {
     display: flex;

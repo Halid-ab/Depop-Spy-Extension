@@ -668,7 +668,7 @@
         ].filter(p => p.val > 0);
 
         const maxVal = Math.max(...prices.map(p => p.val)) || 1;
-        return prices.map(p => `
+        const bars = prices.map(p => `
             <div class="market-bar-row">
                 <div class="market-bar-label">
                     <span>${p.label}</span>
@@ -679,6 +679,21 @@
                 </div>
             </div>
         `).join('');
+
+        return bars + `
+            <div class="market-data-source">
+                Based on <strong>${data.soldData.count}</strong> sold items
+                and <strong>${data.activeListings.length}</strong> active listings
+            </div>
+            <div class="market-data-source">
+                <strong>Market condition:</strong>
+                ${data.activeListings.length > 10 ? "Buyer's Market (high supply)" : "Seller's Market (low supply)"}
+            </div>
+            <div class="market-data-source">
+                <strong>Sell-through rate:</strong>
+                ${data.soldData.count > 8 ? 'High — items like this sell quickly' : data.soldData.count > 3 ? 'Moderate — steady interest' : 'Low — patient seller needed'}
+            </div>
+        `;
     }
 
     function renderSellerTab(data) {
