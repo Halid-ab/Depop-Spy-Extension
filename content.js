@@ -889,16 +889,29 @@
         const rangeP = maxP - minP;
         const getX = (i) => padding + (i / (history.length - 1)) * graphW;
         const getY = (p) => padding + graphH - ((p - minP) / rangeP) * graphH;
+
+        // Detect theme using real DOM attribute
+        const card = document.querySelector('.price-spy-card');
+        const isDark = card?.getAttribute('data-theme') === 'dark';
+
+        // All colors as real hex — CSS variables don't work on canvas
+        const accentColor = '#ff4e00';
+        const textColor = isDark ? '#9ca3af' : '#6b7280';
+        const gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+        const dotBorderColor = isDark ? '#1a1a1a' : '#ffffff';
+
         ctx.clearRect(0, 0, w, h);
-        const isDark = document.querySelector('.price-spy-card').getAttribute('data-theme') === 'dark';
-        const textColor = isDark ? '#94a3b8' : '#64748b';
-        ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+
+        // Grid lines
+        ctx.strokeStyle = gridColor;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(padding, padding);
         ctx.lineTo(padding, padding + graphH);
         ctx.lineTo(padding + graphW, padding + graphH);
         ctx.stroke();
+
+        // X axis date labels
         ctx.fillStyle = textColor;
         ctx.font = '10px sans-serif';
         ctx.textAlign = 'center';
@@ -909,21 +922,33 @@
             const label = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
             ctx.fillText(label, x, padding + graphH + 15);
         });
+
+        // Y axis price labels
         ctx.textAlign = 'right';
         ctx.fillText(formatCurrency(maxP, '$'), padding - 5, padding + 5);
         ctx.fillText(formatCurrency(minP, '$'), padding - 5, padding + graphH);
+
+        // Avg sold dashed line
         if (avgSold > 0) {
             ctx.setLineDash([4, 4]);
             ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 1;
             const avgY = getY(avgSold);
             ctx.beginPath();
             ctx.moveTo(padding, avgY);
             ctx.lineTo(padding + graphW, avgY);
             ctx.stroke();
             ctx.setLineDash([]);
+            ctx.fillStyle = '#22c55e';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Avg Sold', padding + graphW - 55, avgY - 5);
         }
-        ctx.strokeStyle = 'var(--spy-accent)';
+
+        // Price line — FIXED: was using var(--spy-accent)
+        ctx.strokeStyle = accentColor;
         ctx.lineWidth = 2;
+        ctx.setLineDash([]);
         ctx.beginPath();
         history.forEach((entry, i) => {
             const x = getX(i);
@@ -932,18 +957,21 @@
             else ctx.lineTo(x, y);
         });
         ctx.stroke();
+
+        // Dots — FIXED: was using var(--spy-accent)
         history.forEach((entry, i) => {
             const x = getX(i);
             const y = getY(entry.price);
-            ctx.fillStyle = 'var(--spy-accent)';
+            ctx.fillStyle = accentColor;
             ctx.beginPath();
             ctx.arc(x, y, 4, 0, Math.PI * 2);
             ctx.fill();
-            ctx.strokeStyle = isDark ? '#1a1a1a' : '#ffffff';
+            ctx.strokeStyle = dotBorderColor;
             ctx.lineWidth = 1.5;
             ctx.stroke();
         });
     }
+    //end
 
     // --- SPA & Navigation ---
     
