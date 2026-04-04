@@ -348,9 +348,9 @@
 }
 
 .similar-listings-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
 .similar-item {
@@ -360,6 +360,11 @@
     border-radius: 12px;
     overflow: hidden;
     transition: transform 0.2s;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
 }
 
 .similar-item:hover {
@@ -368,13 +373,16 @@
 }
 
 .similar-thumb {
-    width: 100%;
-    aspect-ratio: 1;
+    width: 64px;
+    height: 64px;
     object-fit: cover;
+    border-radius: 8px;
+    flex-shrink: 0;
 }
 
 .similar-info {
-    padding: 10px;
+    flex: 1;
+    min-width: 0;
 }
 
 .similar-title {
