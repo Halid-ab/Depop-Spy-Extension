@@ -139,8 +139,6 @@
             username: seller.username || "Unknown",
             rating: seller.rating || 0,
             reviews: seller.reviewsCount || 0,
-            isVerified: seller.isVerified || false,
-            shopItems: seller.productsCount || 0,
             initials: (seller.username || "U").substring(0, 1).toUpperCase()
         };
     }
@@ -300,7 +298,6 @@
                 seller.username = apiData.seller.username || seller.username;
                 seller.rating = apiData.seller.rating || seller.rating;
                 seller.reviews = apiData.seller.reviewsCount || seller.reviews;
-                seller.isVerified = apiData.seller.isVerified || seller.isVerified;
                 seller.initials = (seller.username || "U").substring(0, 1).toUpperCase();
             }
 
@@ -703,7 +700,7 @@
                 <div class="seller-avatar-placeholder">${data.seller.initials}</div>
                 <div class="seller-meta">
                     <div class="seller-username-row">
-                        @${data.seller.username} ${data.seller.isVerified ? '<span class="verified-badge">✓</span>' : ''}
+                        @${data.seller.username}
                     </div>
                     <div class="seller-rating-row">
                         <span class="star-rating">${"★".repeat(Math.round(data.seller.rating))}${"☆".repeat(5 - Math.round(data.seller.rating))}</span>
