@@ -298,6 +298,7 @@
                 seller.username = apiData.seller.username || seller.username;
                 seller.rating = apiData.seller.rating || seller.rating;
                 seller.reviews = apiData.seller.reviewsCount || seller.reviews;
+                seller.isVerified = apiData.seller.isVerified || seller.isVerified;
                 seller.initials = (seller.username || "U").substring(0, 1).toUpperCase();
             }
 
@@ -328,7 +329,6 @@
                 let searchData = null;
                 let html = null;
 
-                // Try both URL formats
                 for (const soldUrl of soldUrls) {
                     try {
                         const response = await fetch(soldUrl);
@@ -386,11 +386,16 @@
             } catch (e) {}
 
             const diffPercent = soldData.avg > 0 ? Math.round(((currentPrice - soldData.avg) / soldData.avg) * 100) : 0;
+            
+            // --- FIX 10: Rating Logic ---
             let rating = "Fair Price";
             let ratingClass = "rating-fair";
             if (soldData.avg > 0) {
                 if (currentPrice < soldData.avg * 0.85) { rating = "Great Deal"; ratingClass = "rating-great"; }
                 else if (currentPrice > soldData.avg * 1.20) { rating = "Overpriced"; ratingClass = "rating-overpriced"; }
+            } else {
+                rating = "Market Info Unavailable";
+                ratingClass = "rating-neutral";
             }
 
             currentProductData = {
@@ -415,6 +420,7 @@
             isInitializing = false;
         }
     }
+    //end
 
     function findCommonAncestor(el1, el2) {
         let p = el1.parentElement;
@@ -460,6 +466,18 @@
             return;
         }
 
+        // --- FIX 10 LOGIC START ---
+        const hasSoldData = data.soldData.avg > 0;
+        
+        // 1. Determine Stat Box Background (Neutral grey if no data)
+        const statBoxStyle = hasSoldData ? '' : 'background-color: rgba(107, 114, 128, 0.08);';
+
+        // 2. Determine Rating Badge (Hide entirely if no sold data)
+        const ratingBadgeHTML = hasSoldData 
+            ? `<div class="spy-badge ${data.ratingClass}"><span class="badge-dot"></span>${data.rating}</div>` 
+            : '';
+        // --- FIX 10 LOGIC END ---
+
         card.innerHTML = `
             <div class="price-spy-main-content">
                 <div class="price-spy-header">
@@ -468,21 +486,18 @@
                 </div>
                 
                 <div class="spy-stats-grid">
-                    <div class="spy-stat-box">
+                    <div class="spy-stat-box" style="${statBoxStyle}">
                         <div class="spy-stat-label">AVG SOLD</div>
-                        <div class="spy-stat-value">${data.soldData.avg > 0 ? formatCurrency(data.soldData.avg, data.currentPriceStr) : 'N/A'}</div>
+                        <div class="spy-stat-value">${hasSoldData ? formatCurrency(data.soldData.avg, data.currentPriceStr) : '—'}</div>
                     </div>
-                    <div class="spy-stat-box">
+                    <div class="spy-stat-box" style="${statBoxStyle}">
                         <div class="spy-stat-label">MARKET RANGE</div>
-                        <div class="spy-stat-value">${data.soldData.count > 0 ? `${formatCurrency(data.soldData.min, data.currentPriceStr)}–${formatCurrency(data.soldData.max, data.currentPriceStr)}` : 'N/A'}</div>
+                        <div class="spy-stat-value">${data.soldData.count > 0 ? `${formatCurrency(data.soldData.min, data.currentPriceStr)}–${formatCurrency(data.soldData.max, data.currentPriceStr)}` : '—'}</div>
                     </div>
                 </div>
 
                 <div class="spy-badges-row">
-                    <div class="spy-badge ${data.ratingClass}">
-                        <span class="badge-dot"></span>
-                        ${data.rating}
-                    </div>
+                    ${ratingBadgeHTML}
                     <div class="spy-badge ${data.demand.heatClass}">
                         <span class="badge-dot"></span>
                         ${data.demand.heat} Demand
@@ -499,6 +514,7 @@
         const expandTrigger = card.querySelector('.expand-trigger');
         expandTrigger.addEventListener('click', () => openModal());
     }
+    //end
 
     function openModal() {
         if (!currentProductData) return;
