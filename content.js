@@ -23,6 +23,13 @@
         return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
     }
 
+    function getColorFromTitle(title) {
+        const colors = ['#ff4e00','#3b82f6','#22c55e','#eab308','#8b5cf6','#ec4899'];
+        let hash = 0;
+        for (let i = 0; i < title.length; i++) hash = title.charCodeAt(i) + ((hash << 5) - hash);
+        return colors[Math.abs(hash) % colors.length];
+    }
+
     // --- Data Extraction ---
 
     function extractNextData() {
@@ -639,7 +646,9 @@
             }
             return `
                 <a href="${item.url}" target="_blank" class="similar-item">
-                    <img src="${item.img}" class="similar-thumb" />
+                    <div class="similar-thumb-placeholder" style="background: ${getColorFromTitle(item.title)}">
+                        ${item.title.substring(0, 1).toUpperCase()}
+                    </div>
                     <div class="similar-info">
                         <div class="similar-title">${item.title}</div>
                         <div class="similar-price">${formatCurrency(item.price, priceStr)}</div>

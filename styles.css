@@ -380,6 +380,19 @@
     flex-shrink: 0;
 }
 
+.similar-thumb-placeholder {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 700;
+    font-size: 18px;
+}
+
 .similar-info {
     flex: 1;
     min-width: 0;
