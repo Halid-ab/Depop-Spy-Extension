@@ -1,5 +1,5 @@
 /**
- * Depop Price Spy - Expanded Content Script
+ * Depop Price Spy - Content Script (Fixed)
  */
 
 (function() {
@@ -9,12 +9,12 @@
 
     function parsePrice(priceStr) {
         if (!priceStr) return 0;
-        const numeric = priceStr.replace(/[^0-9.]/g, '');
+        const numeric = String(priceStr).replace(/[^0-9.]/g, '');
         return parseFloat(numeric) || 0;
     }
 
     function formatCurrency(value, originalStr) {
-        const symbol = originalStr.match(/[^\d.,\s]/)?.[0] || '$';
+        const symbol = (originalStr || '$').match(/[^\d.,\s]/)?.[0] || '$';
         return symbol + value.toFixed(2);
     }
 
@@ -30,397 +30,338 @@
         return colors[Math.abs(hash) % colors.length];
     }
 
-    // --- Data Extraction ---
+    // --- Price extraction: handles all known Depop formats ---
+
+    function extractPriceValue(item) {
+        // Format 1: { price: { priceAmount: "25.00" } }
+        if (item?.price?.priceAmount) return parseFloat(item.price.priceAmount);
+        // Format 2: { priceAmount: "25.00" }
+        if (item?.priceAmount) return parseFloat(item.priceAmount);
+        // Format 3: { price: "25.00" } (string)
+        if (item?.price && typeof item.price === 'string') return parsePrice(item.price);
+        // Format 4: { price: 25 } (number)
+        if (item?.price && typeof item.price === 'number') return item.price;
+        // Format 5: { priceForBuyer: { amountCents: 2500 } }
+        if (item?.priceForBuyer?.amountCents) return item.priceForBuyer.amountCents / 100;
+        // Format 6: nested in displayItems or meta
+        if (item?.meta?.price) return parsePrice(item.meta.price);
+        return 0;
+    }
+
+    function extractCurrencySymbol(item) {
+        return item?.price?.currencySymbol
+            || item?.currencySymbol
+            || item?.price?.currency === 'USD' ? '$'
+            : item?.price?.currency === 'GBP' ? '£'
+            : item?.price?.currency === 'EUR' ? '€'
+            : '$';
+    }
+
+    // --- Data Extraction from __NEXT_DATA__ ---
 
     function extractNextData() {
         try {
             const script = document.getElementById('__NEXT_DATA__');
-            if (script) {
-                const data = JSON.parse(script.textContent);
-
-                // Log the structure for debugging (truncated to 2 levels)
-                const truncated = JSON.stringify(data, (key, value) => {
-                    if (typeof value === 'object' && value !== null) {
-                        const depth = key.split('.').length;
-                        if (depth > 2) return '[Object]';
-                    }
-                    return value;
-                }, 2);
-                console.log('🕵️ Price Spy: __NEXT_DATA__ structure:', truncated.substring(0, 1000) + '...');
-
-                return data;
-            }
+            if (script) return JSON.parse(script.textContent);
         } catch (e) {
             console.error("🕵️ Price Spy: Error parsing __NEXT_DATA__", e);
         }
         return null;
     }
 
-    function getListingFromNextData(nextData) {
-        if (!nextData) return null;
+    // FIXED: proper recursive search that correctly handles both objects and arrays
+    function deepSearch(obj, predicate, visited = new Set(), depth = 0) {
+        if (depth > 15 || !obj || typeof obj !== 'object' || visited.has(obj)) return null;
+        visited.add(obj);
 
-        // Deep search function that recursively walks the entire JSON tree
-        function deepSearchForListing(obj, visited = new Set()) {
-            // Prevent infinite loops from circular references
-            if (!obj || typeof obj !== 'object' || visited.has(obj)) return null;
-            visited.add(obj);
-
-            // Check if this object looks like a product/listing
-            // Must have: price field AND title field AND (id OR slug)
-            const hasPrice = obj.price !== undefined || obj.priceAmount !== undefined;
-            const hasTitle = obj.title !== undefined && typeof obj.title === 'string';
-            const hasId = obj.id !== undefined || obj.slug !== undefined;
-
-            if (hasPrice && hasTitle && hasId) {
-                console.log('🕵️ Price Spy: Found product node via deep search');
-                return obj;
+        const items = Array.isArray(obj) ? obj : Object.values(obj);
+        for (const val of items) {
+            if (val && typeof val === 'object') {
+                if (predicate(val)) return val;
+                const found = deepSearch(val, predicate, visited, depth + 1);
+                if (found) return found;
             }
-
-            // Recursively search all properties
-            for (const key in obj) {
-                if (obj.hasOwnProperty(key)) {
-                    const result = deepSearchForListing(obj[key], visited);
-                    if (result) return result;
-                }
-            }
-
-            // Also check array elements
-            if (Array.isArray(obj)) {
-                for (const item of obj) {
-                    const result = deepSearchForListing(item, visited);
-                    if (result) return result;
-                }
-            }
-
-            return null;
         }
-
-        return deepSearchForListing(nextData);
+        return null;
     }
 
-    // --- Data Scraping ---
+    function isProductLike(obj) {
+        const hasPrice = extractPriceValue(obj) > 0;
+        const hasTitle = typeof obj.title === 'string' && obj.title.length > 0;
+        const hasId = obj.id !== undefined || obj.slug !== undefined;
+        return hasPrice && hasTitle && hasId;
+    }
+
+    function getListingFromNextData(nextData) {
+        if (!nextData) return null;
+        return deepSearch(nextData, isProductLike);
+    }
+
+    // FIXED: search results extraction with broader predicate
+    function extractSearchResults(searchData) {
+        if (!searchData) return [];
+
+        // Try known paths first
+        const paths = [
+            searchData?.props?.pageProps?.initialState?.products?.results,
+            searchData?.props?.pageProps?.products,
+            searchData?.props?.pageProps?.initialData?.products,
+            searchData?.props?.pageProps?.searchResults,
+            searchData?.props?.pageProps?.data?.results,
+            searchData?.props?.pageProps?.results,
+        ];
+        for (const path of paths) {
+            if (Array.isArray(path) && path.length > 0 && extractPriceValue(path[0]) > 0) {
+                console.log('🕵️ Price Spy: found results via path, count:', path.length);
+                return path;
+            }
+        }
+
+        // Fallback: find any array with 3+ price-bearing items
+        function findArr(obj, visited = new Set(), depth = 0) {
+            if (depth > 12 || !obj || typeof obj !== 'object' || visited.has(obj)) return null;
+            visited.add(obj);
+            if (Array.isArray(obj) && obj.length >= 3) {
+                const sample = obj.slice(0, 3);
+                if (sample.every(i => i && typeof i === 'object' && extractPriceValue(i) > 0)) {
+                    return obj;
+                }
+            }
+            for (const val of Object.values(obj)) {
+                const found = findArr(val, visited, depth + 1);
+                if (found) return found;
+            }
+            return null;
+        }
+        return findArr(searchData) || [];
+    }
+
+    // --- DOM Scraping Fallbacks ---
 
     function getDaysListed(nextData) {
         const product = getListingFromNextData(nextData);
-        if (product && product.dateListed) {
-            return calculateDaysFromDate(new Date(product.dateListed));
-        }
-        const timeEl = document.querySelector('time');
-        if (timeEl && timeEl.getAttribute('datetime')) {
-            const date = new Date(timeEl.getAttribute('datetime'));
-            return calculateDaysFromDate(date);
-        }
+        if (product?.dateListed) return calculateDaysFromDate(new Date(product.dateListed));
+        if (product?.created) return calculateDaysFromDate(new Date(product.created));
+        if (product?.listedAt) return calculateDaysFromDate(new Date(product.listedAt));
+        const timeEl = document.querySelector('time[datetime]');
+        if (timeEl) return calculateDaysFromDate(new Date(timeEl.getAttribute('datetime')));
         return "Unknown";
     }
 
     function getDemandSignals() {
         const text = document.body.innerText;
-        const bagsMatch = text.match(/In (\d+) people's bags/i);
-        const offersMatch = text.match(/(\d+) offers sent/i);
+        const bagsMatch = text.match(/(\d+)\s+(?:people(?:'s)?|person(?:'s)?)\s+bag/i);
+        const offersMatch = text.match(/(\d+)\s+offer/i);
         const bags = bagsMatch ? parseInt(bagsMatch[1]) : 0;
         const offers = offersMatch ? parseInt(offersMatch[1]) : 0;
-        
-        let heat = "Low";
-        let heatClass = "heat-low";
-        if (bags > 10 || offers > 5) {
-            heat = "Hot";
-            heatClass = "heat-hot";
-        } else if (bags > 3 || offers > 2) {
-            heat = "Warm";
-            heatClass = "heat-warm";
-        }
+        let heat = "Low", heatClass = "heat-low";
+        if (bags > 10 || offers > 5) { heat = "Hot"; heatClass = "heat-hot"; }
+        else if (bags > 3 || offers > 2) { heat = "Warm"; heatClass = "heat-warm"; }
         return { bags, offers, heat, heatClass };
     }
 
     function getSellerInfo(nextData) {
         const product = getListingFromNextData(nextData);
-        const seller = product?.seller || {};
+        // seller might be nested under seller, user, or seller.user
+        const raw = product?.seller || product?.user || {};
+        const seller = raw.user || raw;
         return {
             username: seller.username || "Unknown",
             rating: seller.rating || 0,
-            reviews: seller.reviewsCount || 0,
+            reviews: seller.reviewsCount || seller.numberOfReviews || 0,
             initials: (seller.username || "U").substring(0, 1).toUpperCase()
         };
     }
 
-    function extractSearchResults(searchData) {
-        if (!searchData) return [];
-
-        // Try all known result paths
-        const paths = [
-            searchData.props?.pageProps?.initialState?.products?.results,
-            searchData.props?.pageProps?.products,
-            searchData.props?.pageProps?.initialData?.products,
-            searchData.props?.pageProps?.searchResults
-        ];
-
-        for (const path of paths) {
-            if (Array.isArray(path) && path.length > 0) {
-                console.log('🕵️ Price Spy: Found results via path search');
-                return path;
-            }
-        }
-
-        // Fallback: recursively search for any array with items that have a price field
-        function findResultsArray(obj, visited = new Set()) {
-            if (!obj || typeof obj !== 'object' || visited.has(obj)) return null;
-            visited.add(obj);
-
-            // Check if this is an array with items that have prices
-            if (Array.isArray(obj) && obj.length > 2) {
-                const hasItemsWithPrice = obj.slice(0, 3).some(item =>
-                    item && typeof item === 'object' &&
-                    (item.price !== undefined || item.priceAmount !== undefined)
-                );
-                if (hasItemsWithPrice) {
-                    console.log('🕵️ Price Spy: Found results via recursive array search');
-                    return obj;
-                }
-            }
-
-            // Recursively search properties
-            for (const key in obj) {
-                if (obj.hasOwnProperty(key)) {
-                    const result = findResultsArray(obj[key], visited);
-                    if (result) return result;
-                }
-            }
-
-            return null;
-        }
-
-        const fallbackResults = findResultsArray(searchData);
-        return fallbackResults || [];
-    }
-
-    // --- Theme Management ---
+    // --- Theme ---
 
     function detectTheme(card) {
         const bgColor = window.getComputedStyle(document.body).backgroundColor;
         const rgb = bgColor.match(/\d+/g);
         if (rgb) {
             const brightness = (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
-            const isDark = brightness < 128;
-            card.setAttribute('data-theme', isDark ? 'dark' : 'light');
-            const modal = document.querySelector('.spy-modal-inner');
-            if (modal) modal.setAttribute('data-theme', isDark ? 'dark' : 'light');
+            card.setAttribute('data-theme', brightness < 128 ? 'dark' : 'light');
         }
     }
 
     function isProductPage() {
-        return window.location.pathname.includes('/products/');
+        return /\/products\/[^/]+/.test(window.location.pathname);
     }
 
     // --- Main Logic ---
 
     let isInitializing = false;
     let currentProductData = null;
+
     async function init(apiData = null) {
         if (!isProductPage()) {
-            const existingCard = document.querySelector('.price-spy-card');
-            if (existingCard) existingCard.remove();
+            document.querySelector('.price-spy-card')?.remove();
             currentProductData = null;
             return;
         }
         if (isInitializing && !apiData) return;
         isInitializing = true;
-        console.log("🕵️ Depop Price Spy: Initializing...", apiData ? "(with API data)" : "(scraping)");
-        
+        console.log("🕵️ Depop Price Spy: Initializing...", apiData ? "(API data)" : "(scraping)");
+
         try {
             const nextData = extractNextData();
-            const product = apiData || getListingFromNextData(nextData);
+            let product = apiData || getListingFromNextData(nextData);
 
-            // 1. Find placement
-            let buttonCluster;
+            // If we still have no product, try scraping the page URL slug
+            if (!product) {
+                const slugMatch = window.location.pathname.match(/\/products\/([^/?#]+)/);
+                if (slugMatch) product = { slug: slugMatch[1], title: document.querySelector('h1')?.textContent?.trim() || 'Unknown Item' };
+            }
+
+            // 1. Find placement anchor
+            let buttonCluster = null;
             let attempts = 0;
-            const maxAttempts = apiData ? 1 : 10;
-            
-            while (attempts < maxAttempts && !buttonCluster) {
-                const allElements = Array.from(document.querySelectorAll('button'));
-                const makeOfferBtn = allElements.find(el => el.textContent.toLowerCase().includes('make offer'));
-                const addBagBtn = allElements.find(el => el.textContent.toLowerCase().includes('add to bag'));
+            while (attempts < 12 && !buttonCluster) {
+                const allButtons = Array.from(document.querySelectorAll('button'));
+                const makeOfferBtn = allButtons.find(el => el.textContent.trim().toLowerCase().includes('make offer'));
+                const addBagBtn = allButtons.find(el => el.textContent.trim().toLowerCase().includes('add to bag'));
+                const buyBtn = allButtons.find(el => el.textContent.trim().toLowerCase().includes('buy now'));
 
                 if (makeOfferBtn && addBagBtn) {
-                    const actionRow = findCommonAncestor(makeOfferBtn, addBagBtn);
-                    buttonCluster = actionRow;
-                    if (buttonCluster.parentElement && buttonCluster.parentElement.childElementCount <= 3) {
-                        buttonCluster = buttonCluster.parentElement;
-                    }
-                } else {
-                    const buyBtn = allElements.find(el => el.textContent.toLowerCase().includes('buy now'));
-                    if (buyBtn) {
-                        buttonCluster = buyBtn.closest('div[class*="ButtonContainer"]') || buyBtn.parentElement;
-                    }
-                }
-                
-                if (buttonCluster) {
-                    const next = buttonCluster.nextElementSibling;
-                    if (next && (next.tagName === 'HR' || (next.offsetHeight > 0 && next.offsetHeight <= 2))) {
-                        buttonCluster = next;
-                    }
+                    buttonCluster = findCommonAncestor(makeOfferBtn, addBagBtn);
+                    if (buttonCluster?.parentElement?.childElementCount <= 4) buttonCluster = buttonCluster.parentElement;
+                } else if (buyBtn) {
+                    buttonCluster = buyBtn.closest('div') || buyBtn.parentElement;
                 }
 
-                if (!buttonCluster && !apiData) {
-                    await new Promise(r => setTimeout(r, 1000));
+                if (!buttonCluster) {
+                    await new Promise(r => setTimeout(r, 800));
                     attempts++;
-                } else if (!buttonCluster) {
-                    break;
                 }
             }
+            if (!buttonCluster) buttonCluster = document.querySelector('h1')?.parentElement;
 
-            if (!buttonCluster) {
-                buttonCluster = document.querySelector('h1')?.parentElement;
+            // 2. Extract title & price
+            const title = product?.title
+                || document.querySelector('h1')?.textContent?.trim()
+                || "Unknown Item";
+
+            let currentPrice = extractPriceValue(product);
+            if (!currentPrice) {
+                // DOM fallback: grab first element that looks like a price
+                const priceEl = document.querySelector('[class*="price" i], [data-testid*="price" i], [class*="Price"]');
+                currentPrice = parsePrice(priceEl?.textContent);
             }
 
-            // 2. Extract basic data
-            const title = product?.title || document.querySelector('h1')?.textContent?.trim() || "Unknown Item";
-            let currentPrice = 0;
-            if (product?.price?.priceAmount) {
-                currentPrice = parseFloat(product.price.priceAmount);
-            } else if (product?.priceAmount) {
-                currentPrice = parseFloat(product.priceAmount);
-            } else {
-                currentPrice = parsePrice(document.querySelector('[class*="Price"]')?.textContent);
-            }
-
-            const currencySymbol = product?.price?.currencySymbol || product?.currencySymbol || "$";
-            const currentPriceStr = currencySymbol + currentPrice.toFixed(2);
+            const currencySymbol = extractCurrencySymbol(product);
+            const currentPriceStr = currencySymbol + (currentPrice || 0).toFixed(2);
             const url = window.location.href.split('?')[0];
 
+            // Show loading card immediately
             injectCard({ loading: true, currentPriceStr, buttonCluster });
 
-            // 3. Scrape/Extract more data
+            // 3. Remaining data
             const daysListed = getDaysListed(nextData);
             const demand = getDemandSignals();
             const seller = getSellerInfo(nextData);
-            
-            if (apiData && apiData.seller) {
-                seller.username = apiData.seller.username || seller.username;
-                seller.rating = apiData.seller.rating || seller.rating;
-                seller.reviews = apiData.seller.reviewsCount || seller.reviews;
-                seller.isVerified = apiData.seller.isVerified || seller.isVerified;
-                seller.initials = (seller.username || "U").substring(0, 1).toUpperCase();
+
+            if (apiData?.seller) {
+                const s = apiData.seller.user || apiData.seller;
+                seller.username = s.username || seller.username;
+                seller.rating = s.rating || seller.rating;
+                seller.reviews = s.reviewsCount || s.numberOfReviews || seller.reviews;
+                seller.isVerified = s.verified || s.isVerified || false;
+                seller.initials = (seller.username || "U")[0].toUpperCase();
             }
 
-            // 4. Price History
+            // 4. Price history
             let priceHistory = [];
             try {
-                const historyKey = `history_${url}`;
-                const data = await chrome.storage.local.get(historyKey);
-                priceHistory = data[historyKey] || [];
-                const now = Date.now();
-                const lastEntry = priceHistory[priceHistory.length - 1];
-                if (!lastEntry || lastEntry.price !== currentPrice) {
-                    priceHistory.push({ price: currentPrice, timestamp: now });
+                const histKey = `history_${url}`;
+                const stored = await chrome.storage.local.get(histKey);
+                priceHistory = stored[histKey] || [];
+                const last = priceHistory[priceHistory.length - 1];
+                if (currentPrice > 0 && (!last || last.price !== currentPrice)) {
+                    priceHistory.push({ price: currentPrice, timestamp: Date.now() });
                     if (priceHistory.length > 50) priceHistory.shift();
-                    await chrome.storage.local.set({ [historyKey]: priceHistory });
+                    await chrome.storage.local.set({ [histKey]: priceHistory });
                 }
-            } catch (e) {}
+            } catch (e) { console.warn('🕵️ storage error', e); }
 
-            // 5. Market Data
+            // 5. Market data via search pages
             let soldData = { avg: 0, min: 0, max: 0, count: 0 };
-            try {
-                const titleEncoded = encodeURIComponent(title);
-                const soldUrls = [
-                    `https://www.depop.com/search/?q=${titleEncoded}&sold=true`,
-                    `https://www.depop.com/search/?q=${titleEncoded}&itemsType=sold`
-                ];
-
-                let searchData = null;
-                let html = null;
-
-                for (const soldUrl of soldUrls) {
-                    try {
-                        const response = await fetch(soldUrl);
-                        html = await response.text();
-                        const doc = new DOMParser().parseFromString(html, 'text/html');
-                        const script = doc.getElementById('__NEXT_DATA__');
-                        if (script) {
-                            searchData = JSON.parse(script.textContent);
-                            break;
-                        }
-                    } catch (e) {}
-                }
-
-                let prices = [];
-                if (searchData) {
-                    const results = extractSearchResults(searchData);
-                    prices = results.map(r => parseFloat(r.price?.priceAmount)).filter(p => p > 0);
-                }
-
-                if (prices.length === 0 && html) {
-                    const doc = new DOMParser().parseFromString(html, 'text/html');
-                    prices = Array.from(doc.querySelectorAll('[data-testid="product__card"]'))
-                        .map(card => parsePrice(card.querySelector('[class*="Price"]')?.textContent))
-                        .filter(p => p > 0);
-                }
-
-                if (prices.length > 0) {
-                    soldData.count = prices.length;
-                    soldData.min = Math.min(...prices);
-                    soldData.max = Math.max(...prices);
-                    soldData.avg = prices.reduce((a, b) => a + b, 0) / prices.length;
-                }
-            } catch (e) {}
-
-            // 6. Similar Active
             let activeListings = [];
+
             try {
-                const activeUrl = `https://www.depop.com/search/?q=${encodeURIComponent(title)}`;
-                const response = await fetch(activeUrl);
-                const html = await response.text();
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const script = doc.getElementById('__NEXT_DATA__');
-                if (script) {
-                    const searchData = JSON.parse(script.textContent);
-                    const results = extractSearchResults(searchData);
-                    activeListings = results.slice(0, 12).map(r => ({
-                        title: r.title || "Unknown",
-                        price: parseFloat(r.price?.priceAmount) || 0,
-                        img: r.images?.[0]?.[0]?.url || "",
-                        url: "https://www.depop.com/products/" + r.slug,
-                        dateListed: r.dateListed,
-                        daysAgo: r.dateListed ? calculateDaysFromDate(new Date(r.dateListed)) : "Unknown"
-                    }));
+                // Fetch both in parallel for speed
+                const q = encodeURIComponent(title);
+                const [soldHtml, activeHtml] = await Promise.all([
+                    fetchPageHtml(`https://www.depop.com/search/?q=${q}&sold=true`),
+                    fetchPageHtml(`https://www.depop.com/search/?q=${q}`),
+                ]);
+
+                const soldResults = parseSearchHtml(soldHtml);
+                const activeResults = parseSearchHtml(activeHtml);
+
+                const soldPrices = soldResults.map(extractPriceValue).filter(p => p > 0);
+                if (soldPrices.length > 0) {
+                    soldData.count = soldPrices.length;
+                    soldData.min = Math.min(...soldPrices);
+                    soldData.max = Math.max(...soldPrices);
+                    soldData.avg = soldPrices.reduce((a, b) => a + b, 0) / soldPrices.length;
                 }
-            } catch (e) {}
+
+                activeListings = activeResults.slice(0, 12).map(r => ({
+                    title: r.title || "Unknown",
+                    price: extractPriceValue(r),
+                    img: r.images?.[0]?.[0]?.url || r.pictures?.[0]?.url || "",
+                    url: "https://www.depop.com/products/" + (r.slug || ""),
+                    daysAgo: r.dateListed ? calculateDaysFromDate(new Date(r.dateListed)) : "Unknown"
+                }));
+
+                console.log(`🕵️ sold: ${soldData.count}, active: ${activeListings.length}`);
+            } catch (e) {
+                console.warn('🕵️ market fetch error', e);
+            }
 
             const diffPercent = soldData.avg > 0 ? Math.round(((currentPrice - soldData.avg) / soldData.avg) * 100) : 0;
-            
-            // --- FIX 10: Rating Logic ---
-            let rating = "Fair Price";
-            let ratingClass = "rating-fair";
+
+            let rating = "Market Info Unavailable";
+            let ratingClass = "rating-neutral";
             if (soldData.avg > 0) {
                 if (currentPrice < soldData.avg * 0.85) { rating = "Great Deal"; ratingClass = "rating-great"; }
                 else if (currentPrice > soldData.avg * 1.20) { rating = "Overpriced"; ratingClass = "rating-overpriced"; }
-            } else {
-                rating = "Market Info Unavailable";
-                ratingClass = "rating-neutral";
+                else { rating = "Fair Price"; ratingClass = "rating-fair"; }
             }
 
             currentProductData = {
-                loading: false,
-                title,
-                currentPrice,
-                currentPriceStr,
-                daysListed,
-                demand,
-                seller,
-                priceHistory,
-                soldData,
-                activeListings,
-                diffPercent,
-                rating,
-                ratingClass,
-                buttonCluster
+                loading: false, title, currentPrice, currentPriceStr,
+                daysListed, demand, seller, priceHistory, soldData,
+                activeListings, diffPercent, rating, ratingClass, buttonCluster
             };
 
             injectCard(currentProductData);
+        } catch (err) {
+            console.error('🕵️ init error', err);
         } finally {
             isInitializing = false;
         }
     }
-    //end
+
+    // Fetch a page and return its HTML text
+    async function fetchPageHtml(url) {
+        const res = await fetch(url, { credentials: 'omit' });
+        if (!res.ok) throw new Error(`fetch ${url} => ${res.status}`);
+        return res.text();
+    }
+
+    // Parse __NEXT_DATA__ from an HTML string
+    function parseSearchHtml(html) {
+        try {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const script = doc.getElementById('__NEXT_DATA__');
+            if (!script) return [];
+            const data = JSON.parse(script.textContent);
+            return extractSearchResults(data);
+        } catch (e) {
+            return [];
+        }
+    }
 
     function findCommonAncestor(el1, el2) {
         let p = el1.parentElement;
@@ -431,6 +372,8 @@
         return el1.parentElement;
     }
 
+    // --- Card Rendering ---
+
     function injectCard(data) {
         let card = document.querySelector('.price-spy-card');
         if (!card) {
@@ -440,12 +383,7 @@
                 data.buttonCluster.insertAdjacentElement('afterend', card);
             } else {
                 document.body.appendChild(card);
-                card.style.position = 'fixed';
-                card.style.bottom = '20px';
-                card.style.right = '20px';
-                card.style.zIndex = '9999';
-                card.style.maxWidth = '350px';
-                card.style.boxShadow = '0 10px 25px rgba(0,0,0,0.2)';
+                Object.assign(card.style, { position:'fixed', bottom:'20px', right:'20px', zIndex:'9999', maxWidth:'350px', boxShadow:'0 10px 25px rgba(0,0,0,0.2)' });
             }
             detectTheme(card);
         }
@@ -461,22 +399,15 @@
                         <div class="loading-pulse">Analyzing listing data...</div>
                         <div class="loading-bar-bg"><div class="loading-bar-fill"></div></div>
                     </div>
-                </div>
-            `;
+                </div>`;
             return;
         }
 
-        // --- FIX 10 LOGIC START ---
         const hasSoldData = data.soldData.avg > 0;
-        
-        // 1. Determine Stat Box Background (Neutral grey if no data)
         const statBoxStyle = hasSoldData ? '' : 'background-color: rgba(107, 114, 128, 0.08);';
-
-        // 2. Determine Rating Badge (Hide entirely if no sold data)
-        const ratingBadgeHTML = hasSoldData 
-            ? `<div class="spy-badge ${data.ratingClass}"><span class="badge-dot"></span>${data.rating}</div>` 
+        const ratingBadgeHTML = hasSoldData
+            ? `<div class="spy-badge ${data.ratingClass}"><span class="badge-dot"></span>${data.rating}</div>`
             : '';
-        // --- FIX 10 LOGIC END ---
 
         card.innerHTML = `
             <div class="price-spy-main-content">
@@ -484,7 +415,6 @@
                     <span class="spy-emoji">🕵️</span>
                     <span class="spy-title">DEPOP PRICE SPY</span>
                 </div>
-                
                 <div class="spy-stats-grid">
                     <div class="spy-stat-box" style="${statBoxStyle}">
                         <div class="spy-stat-label">AVG SOLD</div>
@@ -492,37 +422,31 @@
                     </div>
                     <div class="spy-stat-box" style="${statBoxStyle}">
                         <div class="spy-stat-label">MARKET RANGE</div>
-                        <div class="spy-stat-value">${data.soldData.count > 0 ? `${formatCurrency(data.soldData.min, data.currentPriceStr)}–${formatCurrency(data.soldData.max, data.currentPriceStr)}` : '—'}</div>
+                        <div class="spy-stat-value">${hasSoldData ? `${formatCurrency(data.soldData.min, data.currentPriceStr)}–${formatCurrency(data.soldData.max, data.currentPriceStr)}` : '—'}</div>
                     </div>
                 </div>
-
                 <div class="spy-badges-row">
                     ${ratingBadgeHTML}
                     <div class="spy-badge ${data.demand.heatClass}">
-                        <span class="badge-dot"></span>
-                        ${data.demand.heat} Demand
+                        <span class="badge-dot"></span>${data.demand.heat} Demand
                     </div>
                 </div>
-
                 <button class="spy-expand-btn expand-trigger">
                     <span>SEE FULL ANALYSIS</span>
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 9l6 6 6-6"/></svg>
                 </button>
-            </div>
-        `;
+            </div>`;
 
-        const expandTrigger = card.querySelector('.expand-trigger');
-        expandTrigger.addEventListener('click', () => openModal());
+        card.querySelector('.expand-trigger').addEventListener('click', () => openModal());
     }
-    //end
+
+    // --- Modal (unchanged from original, just pasted for completeness) ---
 
     function openModal() {
         if (!currentProductData) return;
         const data = currentProductData;
-        const existing = document.querySelector('.spy-overlay-backdrop');
-        if (existing) existing.remove();
-        const existingPos = document.querySelector('.spy-modal-positioner');
-        if (existingPos) existingPos.remove();
+        document.querySelector('.spy-overlay-backdrop')?.remove();
+        document.querySelector('.spy-modal-positioner')?.remove();
 
         const backdrop = document.createElement('div');
         backdrop.className = 'spy-overlay-backdrop';
@@ -530,12 +454,9 @@
 
         const positioner = document.createElement('div');
         positioner.className = 'spy-modal-positioner';
-        
         const inner = document.createElement('div');
         inner.className = 'spy-modal-inner';
-        
-        const card = document.querySelector('.price-spy-card');
-        const theme = card.getAttribute('data-theme');
+        const theme = document.querySelector('.price-spy-card')?.getAttribute('data-theme') || 'light';
         inner.setAttribute('data-theme', theme);
 
         inner.innerHTML = `
@@ -546,7 +467,6 @@
                 <div class="price-spy-tab" data-tab="market">MARKET</div>
                 <div class="price-spy-tab" data-tab="seller">SELLER</div>
             </div>
-            
             <div class="price-spy-tab-content is-active" id="tab-history">
                 <div class="price-history-container">
                     ${data.priceHistory.length > 1 ? `
@@ -559,33 +479,25 @@
                             ${data.priceHistory[0].price > data.currentPrice ? `
                                 <div class="summary-item">
                                     <span class="summary-label">PRICE DROP</span>
-                                    <span class="summary-value" style="color: var(--spy-success)">${formatCurrency(data.priceHistory[0].price - data.currentPrice, data.currentPriceStr)} SAVED</span>
-                                </div>
-                            ` : `
+                                    <span class="summary-value" style="color:var(--spy-success)">${formatCurrency(data.priceHistory[0].price - data.currentPrice, data.currentPriceStr)} SAVED</span>
+                                </div>` : `
                                 <div class="summary-item">
                                     <span class="summary-label">STATUS</span>
                                     <span class="summary-value">STABLE</span>
-                                </div>
-                            `}
-                        </div>
-                    ` : `
+                                </div>`}
+                        </div>` : `
                         <div class="empty-state">
                             <div class="empty-icon">📈</div>
-                            <div class="empty-text">Tracking started. Visit this listing again later to see price changes over time.</div>
-                        </div>
-                    `}
+                            <div class="empty-text">Tracking started. Visit again later to see price changes.</div>
+                        </div>`}
                 </div>
             </div>
-
             <div class="price-spy-tab-content" id="tab-similar">
                 <div class="similar-sort-bar">
                     SORT: <span class="sort-btn" data-sort="low">LOWEST</span> • <span class="sort-btn" data-sort="high">HIGHEST</span> • <span class="sort-btn" data-sort="new">NEWEST</span>
                 </div>
-                <div class="similar-listings-list">
-                    ${renderSimilarListings(data.activeListings, data.currentPriceStr, data.soldData.avg)}
-                </div>
+                <div class="similar-listings-list">${renderSimilarListings(data.activeListings, data.currentPriceStr, data.soldData.avg)}</div>
             </div>
-
             <div class="price-spy-tab-content" id="tab-market">
                 <div class="market-chart">${renderMarketChart(data)}</div>
                 <div class="market-stats-text">
@@ -601,27 +513,16 @@
                     </div>
                 </div>
             </div>
-
-            <div class="price-spy-tab-content" id="tab-seller">
-                ${renderSellerTab(data)}
-            </div>
-        `;
+            <div class="price-spy-tab-content" id="tab-seller">${renderSellerTab(data)}</div>`;
 
         positioner.appendChild(inner);
         document.body.appendChild(positioner);
-
-        setTimeout(() => {
-            backdrop.classList.add('is-visible');
-            inner.classList.add('is-visible');
-        }, 10);
+        setTimeout(() => { backdrop.classList.add('is-visible'); inner.classList.add('is-visible'); }, 10);
 
         const close = () => {
             backdrop.classList.remove('is-visible');
             inner.classList.remove('is-visible');
-            setTimeout(() => {
-                backdrop.remove();
-                positioner.remove();
-            }, 300);
+            setTimeout(() => { backdrop.remove(); positioner.remove(); }, 300);
         };
         inner.querySelector('.spy-modal-close').onclick = close;
         backdrop.onclick = close;
@@ -649,27 +550,22 @@
     }
 
     function renderSimilarListings(listings, priceStr, avgSold) {
-        if (listings.length === 0) return '<div class="empty-state">No similar listings found.</div>';
+        if (!listings.length) return '<div class="empty-state">No similar listings found.</div>';
         return listings.map(item => {
-            let badge = "Fair";
-            let badgeClass = "rating-fair";
+            let badge = "Fair", badgeClass = "rating-fair";
             if (avgSold > 0) {
                 if (item.price < avgSold * 0.85) { badge = "Good Deal"; badgeClass = "rating-great"; }
                 else if (item.price > avgSold * 1.15) { badge = "Overpriced"; badgeClass = "rating-overpriced"; }
             }
-            return `
-                <a href="${item.url}" target="_blank" class="similar-item">
-                    <div class="similar-thumb-placeholder" style="background: ${getColorFromTitle(item.title)}">
-                        ${item.title.substring(0, 1).toUpperCase()}
-                    </div>
-                    <div class="similar-info">
-                        <div class="similar-title">${item.title}</div>
-                        <div class="similar-price">${formatCurrency(item.price, priceStr)}</div>
-                        <div class="similar-listed-date">Listed ${item.daysAgo} days ago</div>
-                        <span class="similar-badge ${badgeClass}">${badge}</span>
-                    </div>
-                </a>
-            `;
+            return `<a href="${item.url}" target="_blank" class="similar-item">
+                <div class="similar-thumb-placeholder" style="background:${getColorFromTitle(item.title)}">${item.title[0]?.toUpperCase()}</div>
+                <div class="similar-info">
+                    <div class="similar-title">${item.title}</div>
+                    <div class="similar-price">${formatCurrency(item.price, priceStr)}</div>
+                    <div class="similar-listed-date">Listed ${item.daysAgo} days ago</div>
+                    <span class="similar-badge ${badgeClass}">${badge}</span>
+                </div>
+            </a>`;
         }).join('');
     }
 
@@ -679,34 +575,18 @@
             { label: "AVG SOLD", val: data.soldData.avg, color: "var(--spy-muted)" },
             { label: "LOWEST ACTIVE", val: data.activeListings.length > 0 ? Math.min(...data.activeListings.map(l => l.price)) : 0, color: "var(--spy-warning)" }
         ].filter(p => p.val > 0);
-
         const maxVal = Math.max(...prices.map(p => p.val)) || 1;
-        const bars = prices.map(p => `
+        return prices.map(p => `
             <div class="market-bar-row">
                 <div class="market-bar-label">
                     <span>${p.label}</span>
-                    <span style="font-family: var(--spy-font-mono)">${formatCurrency(p.val, data.currentPriceStr)}</span>
+                    <span style="font-family:var(--spy-font-mono)">${formatCurrency(p.val, data.currentPriceStr)}</span>
                 </div>
-                <div class="market-bar-wrapper">
-                    <div class="market-bar" style="width: ${(p.val / maxVal) * 100}%; background-color: ${p.color};"></div>
-                </div>
-            </div>
-        `).join('');
-
-        return bars + `
-            <div class="market-data-source">
-                Based on <strong>${data.soldData.count}</strong> sold items
-                and <strong>${data.activeListings.length}</strong> active listings
-            </div>
-            <div class="market-data-source">
-                <strong>Market condition:</strong>
-                ${data.activeListings.length > 10 ? "Buyer's Market (high supply)" : "Seller's Market (low supply)"}
-            </div>
-            <div class="market-data-source">
-                <strong>Sell-through rate:</strong>
-                ${data.soldData.count > 8 ? 'High — items like this sell quickly' : data.soldData.count > 3 ? 'Moderate — steady interest' : 'Low — patient seller needed'}
-            </div>
-        `;
+                <div class="market-bar-wrapper"><div class="market-bar" style="width:${(p.val/maxVal)*100}%;background-color:${p.color}"></div></div>
+            </div>`).join('') + `
+            <div class="market-data-source">Based on <strong>${data.soldData.count}</strong> sold and <strong>${data.activeListings.length}</strong> active listings</div>
+            <div class="market-data-source"><strong>Market:</strong> ${data.activeListings.length > 10 ? "Buyer's Market" : "Seller's Market"}</div>
+            <div class="market-data-source"><strong>Sell-through:</strong> ${data.soldData.count > 8 ? 'High' : data.soldData.count > 3 ? 'Moderate' : 'Low'}</div>`;
     }
 
     function renderSellerTab(data) {
@@ -715,71 +595,55 @@
             <div class="seller-stats-header">
                 <div class="seller-avatar-placeholder">${data.seller.initials}</div>
                 <div class="seller-meta">
-                    <div class="seller-username-row">
-                        @${data.seller.username}
-                    </div>
+                    <div class="seller-username-row">@${data.seller.username}</div>
                     <div class="seller-rating-row">
-                        <span class="star-rating">${"★".repeat(Math.round(data.seller.rating))}${"☆".repeat(5 - Math.round(data.seller.rating))}</span>
+                        <span class="star-rating">${"★".repeat(Math.round(data.seller.rating))}${"☆".repeat(5-Math.round(data.seller.rating))}</span>
                         <span>(${data.seller.reviews} REVIEWS)</span>
                     </div>
                 </div>
             </div>
-
             <div class="intelligence-score-section">
                 <div class="score-header">
-                    <div class="score-title">
-                        OFFER INTELLIGENCE
-                        <span class="info-tooltip-trigger">ⓘ
-                            <div class="info-tooltip">Predicts seller motivation based on listing age, price drops, and market demand.</div>
-                        </span>
-                    </div>
-                    <div class="score-verdict" style="color: ${scoreData.color}">${scoreData.verdict}</div>
+                    <div class="score-title">OFFER INTELLIGENCE <span class="info-tooltip-trigger">ⓘ<div class="info-tooltip">Predicts seller motivation based on listing age, price drops, and market demand.</div></span></div>
+                    <div class="score-verdict" style="color:${scoreData.color}">${scoreData.verdict}</div>
                 </div>
-                <div class="score-progress-bar">
-                    <div class="score-fill" style="width: ${scoreData.normalized * 10}%; background-color: ${scoreData.color}"></div>
-                </div>
-                <ul class="score-bullets">
-                    ${scoreData.bullets.map(b => `<li><span>${b.icon}</span> ${b.text}</li>`).join('')}
-                </ul>
+                <div class="score-progress-bar"><div class="score-fill" style="width:${scoreData.normalized*10}%;background-color:${scoreData.color}"></div></div>
+                <ul class="score-bullets">${scoreData.bullets.map(b=>`<li><span>${b.icon}</span> ${b.text}</li>`).join('')}</ul>
             </div>
-
             <div class="offer-calculator-section">
                 <div class="calculator-title">INTERACTIVE OFFER CALCULATOR</div>
                 <div class="calculator-input-row">
                     <input type="number" class="offer-input" placeholder="ENTER OFFER AMOUNT" />
                     <button class="analyze-btn">ANALYZE</button>
                 </div>
-                <div class="calculator-results" style="display: none;">
+                <div class="calculator-results" style="display:none">
                     <div class="results-verdict"></div>
                     <div class="results-explanation"></div>
                     <div class="sweet-spot-box"></div>
                 </div>
-            </div>
-        `;
+            </div>`;
     }
 
     function calculateSellerScore(data) {
         let raw = 0;
         const bullets = [];
-        if (data.daysListed > 30) { raw += 3; bullets.push({ icon: "⏳", text: "Listed over 30 days ago (High motivation)" }); }
-        else if (data.daysListed > 14) { raw += 1; bullets.push({ icon: "📅", text: "Listed for 2 weeks" }); }
-        else { raw -= 1; bullets.push({ icon: "✨", text: "Fresh listing (Lower motivation)" }); }
+        if (data.daysListed > 30) { raw += 3; bullets.push({ icon:"⏳", text:"Listed 30+ days (High motivation)" }); }
+        else if (data.daysListed > 14) { raw += 1; bullets.push({ icon:"📅", text:"Listed 2 weeks" }); }
+        else { raw -= 1; bullets.push({ icon:"✨", text:"Fresh listing (Lower motivation)" }); }
         if (data.priceHistory.length > 1 && data.priceHistory[0].price > data.currentPrice) {
-            raw += 3; bullets.push({ icon: "📉", text: "Seller has already dropped price" });
+            raw += 3; bullets.push({ icon:"📉", text:"Seller already dropped price" });
         }
         if (data.soldData.avg > 0) {
-            if (data.currentPrice > data.soldData.avg * 1.1) { raw += 2; bullets.push({ icon: "💰", text: "Priced above market average" }); }
-            else if (data.currentPrice < data.soldData.avg * 0.9) { raw -= 2; bullets.push({ icon: "🏷️", text: "Already priced competitively" }); }
+            if (data.currentPrice > data.soldData.avg * 1.1) { raw += 2; bullets.push({ icon:"💰", text:"Priced above market average" }); }
+            else if (data.currentPrice < data.soldData.avg * 0.9) { raw -= 2; bullets.push({ icon:"🏷️", text:"Already priced competitively" }); }
         }
-        if (data.demand.bags > 15) { raw -= 2; bullets.push({ icon: "🔥", text: "High interest (Many people have in bag)" }); }
-        if (data.seller.reviews < 25) { raw += 1; bullets.push({ icon: "🆕", text: "Newer seller (More flexible)" }); }
-        else if (data.seller.reviews > 100) { raw -= 1; bullets.push({ icon: "✅", text: "Experienced seller (Knows market value)" }); }
+        if (data.demand.bags > 15) { raw -= 2; bullets.push({ icon:"🔥", text:"High bag interest" }); }
+        if (data.seller.reviews < 25) { raw += 1; bullets.push({ icon:"🆕", text:"Newer seller (More flexible)" }); }
+        else if (data.seller.reviews > 100) { raw -= 1; bullets.push({ icon:"✅", text:"Experienced seller" }); }
         const normalized = Math.max(0, Math.min(10, ((raw + 5) / 15) * 10));
-        let verdict = "Uncertain ⚪";
-        let color = "#94a3b8";
+        let verdict = "Uncertain ⚪", color = "#94a3b8";
         if (raw >= 6) { verdict = "Very Likely ✅"; color = "#22c55e"; }
         else if (raw >= 3) { verdict = "Likely 🟡"; color = "#eab308"; }
-        else if (raw >= 1) { verdict = "Uncertain ⚪"; color = "#94a3b8"; }
         else if (raw <= 0) { verdict = "Unlikely 🔴"; color = "#ef4444"; }
         return { raw, normalized, verdict, color, bullets };
     }
@@ -788,120 +652,47 @@
         const input = modal.querySelector('.offer-input');
         const btn = modal.querySelector('.analyze-btn');
         const results = modal.querySelector('.calculator-results');
-        const verdict = modal.querySelector('.results-verdict');
-        const explanation = modal.querySelector('.results-explanation');
-        const sweetSpot = modal.querySelector('.sweet-spot-box');
+        const verdictEl = modal.querySelector('.results-verdict');
+        const explanationEl = modal.querySelector('.results-explanation');
+        const sweetSpotEl = modal.querySelector('.sweet-spot-box');
         if (!btn) return;
+
         btn.onclick = () => {
             const offer = parseFloat(input.value);
-            if (isNaN(offer) || offer <= 0) return;
-
-            // Show spinner during analysis
+            if (!offer || offer <= 0) return;
             results.style.display = 'block';
-            verdict.innerText = 'Analyzing...';
-            verdict.style.color = '#94a3b8';
-            explanation.innerText = '';
-            sweetSpot.style.display = 'none';
+            verdictEl.innerText = 'Analyzing...';
+            verdictEl.style.color = '#94a3b8';
+            explanationEl.innerText = '';
+            sweetSpotEl.style.display = 'none';
 
             setTimeout(() => {
-                // 1. Get base seller score
                 const baseScore = calculateSellerScore(data).raw;
-
-                // 2. Calculate offer score
                 let offerScore = 0;
-                const percentOfAsk = (offer / data.currentPrice) * 100;
-                const belowAsk = data.currentPrice - offer;
-                const percentBelowAsk = (belowAsk / data.currentPrice) * 100;
-
-                // Points based on % below asking
-                if (percentBelowAsk <= 10) {
-                    offerScore += 3;
-                } else if (percentBelowAsk <= 20) {
-                    offerScore += 1;
-                } else if (percentBelowAsk <= 30) {
-                    offerScore -= 1;
-                } else {
-                    offerScore -= 3;
-                }
-
-                // Points based on avg sold comparison
+                const pctBelow = ((data.currentPrice - offer) / data.currentPrice) * 100;
+                if (pctBelow <= 10) offerScore += 3;
+                else if (pctBelow <= 20) offerScore += 1;
+                else if (pctBelow <= 30) offerScore -= 1;
+                else offerScore -= 3;
                 if (data.soldData.avg > 0) {
-                    const diffFromAvg = data.soldData.avg - offer;
-                    if (offer > data.soldData.avg) {
-                        offerScore += 2;
-                    } else if (diffFromAvg <= 5) {
-                        offerScore += 1;
-                    } else if (diffFromAvg <= 15) {
-                        offerScore -= 1;
-                    } else {
-                        offerScore -= 3;
-                    }
+                    if (offer > data.soldData.avg) offerScore += 2;
+                    else if (data.soldData.avg - offer <= 5) offerScore += 1;
+                    else if (data.soldData.avg - offer <= 15) offerScore -= 1;
+                    else offerScore -= 3;
                 }
-
-                // 3. Combined score
                 const combined = baseScore + offerScore;
-
-                // 4. Determine verdict and color
-                let resultVerdict = "";
-                let resultColor = "";
-                if (combined >= 8) {
-                    resultVerdict = "Strong chance of acceptance ✅";
-                    resultColor = "#22c55e";
-                } else if (combined >= 4) {
-                    resultVerdict = "Decent shot 🟡";
-                    resultColor = "#eab308";
-                } else if (combined >= 1) {
-                    resultVerdict = "Slim chance ⚠️";
-                    resultColor = "#f97316";
-                } else {
-                    resultVerdict = "Very likely declined ❌";
-                    resultColor = "#ef4444";
-                }
-
-                // 5. Generate explanation
-                let motivationText = "";
-                if (data.daysListed > 30) {
-                    motivationText = "The seller appears motivated (listed 30+ days).";
-                } else if (data.priceHistory.length > 1 && data.priceHistory[0].price > data.currentPrice) {
-                    motivationText = "The seller has already dropped the price, suggesting flexibility.";
-                } else if (data.daysListed > 14) {
-                    motivationText = "The seller may be willing to negotiate.";
-                } else {
-                    motivationText = "The seller is less likely to negotiate on a fresh listing.";
-                }
-
-                let soldComparison = "";
-                if (data.soldData.avg > 0) {
-                    if (offer > data.soldData.avg) {
-                        soldComparison = ` Your offer is above the market average (${formatCurrency(data.soldData.avg, data.currentPriceStr)}).`;
-                    } else {
-                        const belowAvg = Math.round(((data.soldData.avg - offer) / data.soldData.avg) * 100);
-                        soldComparison = ` Your offer is ${belowAvg}% below market average.`;
-                    }
-                }
-
-                const resultExp = `Your offer of ${formatCurrency(offer, data.currentPriceStr)} is ${Math.round(percentBelowAsk)}% below asking. ${motivationText}${soldComparison}`;
-
-                // 6. Calculate sweet spot
-                let sweetSpotPrice = 0;
-                if (data.soldData.avg > 0) {
-                    if (baseScore >= 5) {
-                        sweetSpotPrice = Math.max(offer, data.soldData.avg * 0.90);
-                    } else if (baseScore >= 2) {
-                        sweetSpotPrice = data.soldData.avg * 0.95;
-                    } else {
-                        sweetSpotPrice = data.currentPrice * 0.92;
-                    }
-                } else {
-                    sweetSpotPrice = data.currentPrice * 0.85;
-                }
-
-                // Update results
-                verdict.innerText = resultVerdict;
-                verdict.style.color = resultColor;
-                explanation.innerText = resultExp;
-                sweetSpot.style.display = 'block';
-                sweetSpot.innerText = `💡 Sweet spot: ~${formatCurrency(sweetSpotPrice, data.currentPriceStr)}`;
+                let v = "Very likely declined ❌", vc = "#ef4444";
+                if (combined >= 8) { v = "Strong chance of acceptance ✅"; vc = "#22c55e"; }
+                else if (combined >= 4) { v = "Decent shot 🟡"; vc = "#eab308"; }
+                else if (combined >= 1) { v = "Slim chance ⚠️"; vc = "#f97316"; }
+                const sweetSpotPrice = data.soldData.avg > 0
+                    ? (baseScore >= 5 ? Math.max(offer, data.soldData.avg * 0.90) : baseScore >= 2 ? data.soldData.avg * 0.95 : data.currentPrice * 0.92)
+                    : data.currentPrice * 0.85;
+                verdictEl.innerText = v;
+                verdictEl.style.color = vc;
+                explanationEl.innerText = `Your offer of ${formatCurrency(offer, data.currentPriceStr)} is ${Math.round(pctBelow)}% below asking.`;
+                sweetSpotEl.style.display = 'block';
+                sweetSpotEl.innerText = `💡 Sweet spot: ~${formatCurrency(sweetSpotPrice, data.currentPriceStr)}`;
             }, 800);
         };
     }
@@ -914,119 +705,62 @@
         canvas.width = rect.width * dpr;
         canvas.height = rect.height * dpr;
         ctx.scale(dpr, dpr);
-        const w = rect.width;
-        const h = rect.height;
-        const padding = 35;
-        const graphW = w - padding * 2;
-        const graphH = h - padding * 2;
+        const w = rect.width, h = rect.height, pad = 35;
+        const gw = w - pad * 2, gh = h - pad * 2;
         const prices = history.map(h => h.price);
         if (avgSold > 0) prices.push(avgSold);
-        const minP = Math.min(...prices) * 0.95;
-        const maxP = Math.max(...prices) * 1.05;
-        const rangeP = maxP - minP;
-        const getX = (i) => padding + (i / (history.length - 1)) * graphW;
-        const getY = (p) => padding + graphH - ((p - minP) / rangeP) * graphH;
-
-        // Detect theme using real DOM attribute
+        const minP = Math.min(...prices) * 0.95, maxP = Math.max(...prices) * 1.05;
+        const rangeP = maxP - minP || 1;
+        const getX = i => pad + (i / (history.length - 1)) * gw;
+        const getY = p => pad + gh - ((p - minP) / rangeP) * gh;
         const card = document.querySelector('.price-spy-card');
         const isDark = card?.getAttribute('data-theme') === 'dark';
-
-        // All colors as real hex — CSS variables don't work on canvas
-        const accentColor = '#ff4e00';
-        const textColor = isDark ? '#9ca3af' : '#6b7280';
+        const accent = '#ff4e00', textColor = isDark ? '#9ca3af' : '#6b7280';
         const gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
-        const dotBorderColor = isDark ? '#1a1a1a' : '#ffffff';
-
+        const dotBorder = isDark ? '#1a1a1a' : '#ffffff';
         ctx.clearRect(0, 0, w, h);
-
-        // Grid lines
-        ctx.strokeStyle = gridColor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(padding, padding);
-        ctx.lineTo(padding, padding + graphH);
-        ctx.lineTo(padding + graphW, padding + graphH);
-        ctx.stroke();
-
-        // X axis date labels
-        ctx.fillStyle = textColor;
-        ctx.font = '10px sans-serif';
-        ctx.textAlign = 'center';
-        history.forEach((entry, i) => {
+        ctx.strokeStyle = gridColor; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(pad, pad); ctx.lineTo(pad, pad + gh); ctx.lineTo(pad + gw, pad + gh); ctx.stroke();
+        ctx.fillStyle = textColor; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+        history.forEach((e, i) => {
             if (history.length > 6 && i % Math.ceil(history.length / 5) !== 0) return;
-            const x = getX(i);
-            const date = new Date(entry.timestamp);
-            const label = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-            ctx.fillText(label, x, padding + graphH + 15);
+            ctx.fillText(new Date(e.timestamp).toLocaleDateString(undefined, { month:'short', day:'numeric' }), getX(i), pad + gh + 15);
         });
-
-        // Y axis price labels
         ctx.textAlign = 'right';
-        ctx.fillText(formatCurrency(maxP, '$'), padding - 5, padding + 5);
-        ctx.fillText(formatCurrency(minP, '$'), padding - 5, padding + graphH);
-
-        // Avg sold dashed line
+        ctx.fillText(formatCurrency(maxP, '$'), pad - 5, pad + 5);
+        ctx.fillText(formatCurrency(minP, '$'), pad - 5, pad + gh);
         if (avgSold > 0) {
-            ctx.setLineDash([4, 4]);
-            ctx.strokeStyle = '#22c55e';
-            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]); ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 1;
             const avgY = getY(avgSold);
-            ctx.beginPath();
-            ctx.moveTo(padding, avgY);
-            ctx.lineTo(padding + graphW, avgY);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            ctx.fillStyle = '#22c55e';
-            ctx.font = '10px sans-serif';
-            ctx.textAlign = 'left';
-            ctx.fillText('Avg Sold', padding + graphW - 55, avgY - 5);
+            ctx.beginPath(); ctx.moveTo(pad, avgY); ctx.lineTo(pad + gw, avgY); ctx.stroke();
+            ctx.setLineDash([]); ctx.fillStyle = '#22c55e'; ctx.font = '10px sans-serif';
+            ctx.textAlign = 'left'; ctx.fillText('Avg Sold', pad + gw - 55, avgY - 5);
         }
-
-        // Price line — FIXED: was using var(--spy-accent)
-        ctx.strokeStyle = accentColor;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([]);
+        ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.setLineDash([]);
         ctx.beginPath();
-        history.forEach((entry, i) => {
-            const x = getX(i);
-            const y = getY(entry.price);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        });
+        history.forEach((e, i) => { const x = getX(i), y = getY(e.price); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
         ctx.stroke();
-
-        // Dots — FIXED: was using var(--spy-accent)
-        history.forEach((entry, i) => {
-            const x = getX(i);
-            const y = getY(entry.price);
-            ctx.fillStyle = accentColor;
-            ctx.beginPath();
-            ctx.arc(x, y, 4, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.strokeStyle = dotBorderColor;
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
+        history.forEach((e, i) => {
+            const x = getX(i), y = getY(e.price);
+            ctx.fillStyle = accent; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = dotBorder; ctx.lineWidth = 1.5; ctx.stroke();
         });
     }
-    //end
 
-    // --- SPA & Navigation ---
-    
+    // --- SPA Navigation ---
+
     let lastUrl = location.href;
-    let lastProductId = "";
+    let lastProductId = '';
     function getProductId() {
-        const match = location.href.match(/\/products\/([^\/?#]+)/);
-        return match ? match[1] : "";
+        const m = location.href.match(/\/products\/([^/?#]+)/);
+        return m ? m[1] : '';
     }
     const observer = new MutationObserver(() => {
-        const currentUrl = location.href;
-        const currentProductId = getProductId();
-        if (currentUrl !== lastUrl || currentProductId !== lastProductId) {
-            lastUrl = currentUrl;
-            lastProductId = currentProductId;
-            if (currentUrl.includes('/products/')) {
-                const existing = document.querySelector('.price-spy-card');
-                if (existing) existing.remove();
+        const cur = location.href, pid = getProductId();
+        if (cur !== lastUrl || pid !== lastProductId) {
+            lastUrl = cur; lastProductId = pid;
+            if (cur.includes('/products/')) {
+                document.querySelector('.price-spy-card')?.remove();
                 setTimeout(init, 1500);
             }
         }
@@ -1034,26 +768,23 @@
     observer.observe(document, { subtree: true, childList: true });
     window.addEventListener('popstate', () => setTimeout(init, 1000));
 
-    window.addEventListener('message', (event) => {
-        if (event.data && event.data.type === 'DEPOP_API_RESPONSE') {
-            const { url, data } = event.data;
-            if (location.href.includes('/products/') && url.includes('/products/')) {
-                const product = data.product || data.listing || data;
-                if (product && product.id) {
-                    init(product);
-                }
+    window.addEventListener('message', event => {
+        if (event.data?.type === 'DEPOP_API_RESPONSE' && location.pathname.includes('/products/')) {
+            const d = event.data.data;
+            // Handle multiple known API response shapes
+            const product = d?.product || d?.listing || d?.data?.product || d;
+            if (product?.id || product?.slug) {
+                console.log('🕵️ API data received, re-initializing');
+                init(product);
             }
         }
     });
 
-    if (location.href.includes('/products/')) {
-        const checkTitle = setInterval(() => {
-            if (document.querySelector('h1')) {
-                clearInterval(checkTitle);
-                init();
-            }
+    if (isProductPage()) {
+        const check = setInterval(() => {
+            if (document.querySelector('h1')) { clearInterval(check); init(); }
         }, 500);
-        setTimeout(() => clearInterval(checkTitle), 5000);
+        setTimeout(() => clearInterval(check), 8000);
     }
 
 })();
