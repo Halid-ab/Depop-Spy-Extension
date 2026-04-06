@@ -61,7 +61,7 @@
 
     function extractNextData() {
         try {
-            const script = document.getElementById('__NEXT_DATA__');
+            const script = document.getElementById('__NEXT_DATA__') || document.getElementById('NEXT_DATA');
             if (script) return JSON.parse(script.textContent);
         } catch (e) {
             console.error("🕵️ Price Spy: Error parsing __NEXT_DATA__", e);
@@ -288,15 +288,9 @@
             let activeListings = [];
 
             try {
-                // Fetch both in parallel for speed
-                const q = encodeURIComponent(title);
-                const [soldHtml, activeHtml] = await Promise.all([
-                    fetchPageHtml(`https://www.depop.com/search/?q=${q}&sold=true`),
-                    fetchPageHtml(`https://www.depop.com/search/?q=${q}`),
-                ]);
-
-                const soldResults = parseSearchHtml(soldHtml);
-                const activeResults = parseSearchHtml(activeHtml);
+                const searchData = await requestSearchData(title);
+                const soldResults = extractSearchResults(searchData?.soldData);
+                const activeResults = extractSearchResults(searchData?.activeData);
 
                 const soldPrices = soldResults.map(extractPriceValue).filter(p => p > 0);
                 if (soldPrices.length > 0) {
@@ -343,24 +337,22 @@
         }
     }
 
-    // Fetch a page and return its HTML text
-    async function fetchPageHtml(url) {
-        const res = await fetch(url, { credentials: 'omit' });
-        if (!res.ok) throw new Error(`fetch ${url} => ${res.status}`);
-        return res.text();
-    }
+    async function requestSearchData(query) {
+        return new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ type: 'PRICE_SPY_FETCH_SEARCH_DATA', query }, response => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
 
-    // Parse __NEXT_DATA__ from an HTML string
-    function parseSearchHtml(html) {
-        try {
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            const script = doc.getElementById('__NEXT_DATA__');
-            if (!script) return [];
-            const data = JSON.parse(script.textContent);
-            return extractSearchResults(data);
-        } catch (e) {
-            return [];
-        }
+                if (!response?.ok) {
+                    reject(new Error(response?.error || 'Failed to fetch search data'));
+                    return;
+                }
+
+                resolve(response);
+            });
+        });
     }
 
     function findCommonAncestor(el1, el2) {
@@ -777,6 +769,25 @@
                 console.log('🕵️ API data received, re-initializing');
                 init(product);
             }
+        }
+    });
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message?.type !== 'PRICE_SPY_EXTRACT_NEXT_DATA') return;
+
+        try {
+            const data = extractNextData();
+            sendResponse({
+                ok: Boolean(data),
+                data,
+                error: data ? null : 'No __NEXT_DATA__ found on page'
+            });
+        } catch (error) {
+            sendResponse({
+                ok: false,
+                data: null,
+                error: error?.message || String(error)
+            });
         }
     });
 

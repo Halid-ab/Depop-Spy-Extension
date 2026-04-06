@@ -4,8 +4,13 @@
   "version": "1.0",
   "description": "Track price drops and see average sold prices on Depop listings.",
   "permissions": [
-    "storage"
+    "storage",
+    "tabs",
+    "windows"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "host_permissions": [
     "*://*.depop.com/*"
   ],
